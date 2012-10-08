@@ -10,61 +10,101 @@ import re
 
 class SpotifyPlayer(object):
     def __init__(self):
-        self.connect()
-
-    def connect(self):
         self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
-        self.player = dbus.Interface(
-            self.bus.get_object(
-                'com.spotify.qt',
-                '/org/mpris/MediaPlayer2',
-            ),
-            'org.mpris.MediaPlayer2.Player',
+        self.connect()
+        self.bus.get_object(
+            'org.freedesktop.DBus',
+            '/org/freedesktop/DBus',
+        ).connect_to_signal(
+            'NameOwnerChanged',
+            self.activate,
+            arg0='com.spotify.qt',
         )
 
+    def connect(self):
+        try:
+            self.player = dbus.Interface(
+                self.bus.get_object(
+                    'com.spotify.qt',
+                    '/org/mpris/MediaPlayer2',
+                ),
+                'org.mpris.MediaPlayer2.Player',
+            )
+        except dbus.exceptions.DBusException:
+            pass
+
+    def activate(self, name, old, new):
+        if new:
+            self.connect()
+        else:
+            del self.player
+            self.player = None
+
     def play_pause(self):
-        self.player.PlayPause()
+        if self.player:
+            self.player.PlayPause()
 
     def pause(self):
-        self.player.Pause()
+        if self.player:
+            self.player.Pause()
 
     def next(self):
-        self.player.Next()
+        if self.player:
+            self.player.Next()
 
     def previous(self):
-        self.player.Previous()
+        if self.player:
+            self.player.Previous()
 
 
 class SpotifyNotifier(dbus.service.Object):
     def __init__(self):
         self.metadata = None
         self.current_trackid = None
+        self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
         self.connect()
+        self.bus.get_object(
+            'org.freedesktop.DBus',
+            '/org/freedesktop/DBus',
+        ).connect_to_signal(
+            'NameOwnerChanged',
+            self.activate,
+            arg0='com.spotify.qt',
+        )
 
     def connect(self):
-        self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
-        self.notifier = dbus.Interface(
-            self.bus.get_object(
+        try:
+            self.notifier = dbus.Interface(
+                self.bus.get_object(
+                    'org.freedesktop.Notifications',
+                    '/org/freedesktop/Notifications',
+                ),
                 'org.freedesktop.Notifications',
-                '/org/freedesktop/Notifications',
-            ),
-            'org.freedesktop.Notifications',
-        )
-        self.spotify = self.bus.get_object(
-                'com.spotify.qt',
-                '/org/mpris/MediaPlayer2',
-        )
-        self.spotify.connect_to_signal(
-            'PropertiesChanged',
-            self.properties_changed,
-        )
-        self.metadata = dbus.Interface(
-            self.spotify,
-            'org.freedesktop.DBus.Properties',
-        ).Get(
-            'org.mpris.MediaPlayer2.Player',
-            'Metadata',
-        )
+            )
+            self.spotify = self.bus.get_object(
+                    'com.spotify.qt',
+                    '/org/mpris/MediaPlayer2',
+            )
+            self.spotify.connect_to_signal(
+                'PropertiesChanged',
+                self.properties_changed,
+            )
+            self.metadata = dbus.Interface(
+                self.spotify,
+                'org.freedesktop.DBus.Properties',
+            ).Get(
+                'org.mpris.MediaPlayer2.Player',
+                'Metadata',
+            )
+        except dbus.exceptions.DBusException:
+            pass
+
+    def activate(self, name, old, new):
+        if new:
+            self.connect()
+        else:
+            self.metadata = None
+            self.current_trackid = None
 
     def get_cover_url(self, trackid):
         url = 'http://open.spotify.com/track/%s' % trackid.split(':')[-1]
@@ -85,28 +125,27 @@ class SpotifyNotifier(dbus.service.Object):
             return 'icon_spotify.png'
 
     def show(self):
-        try:
-            artist = self.metadata['xesam:artist'].encode('utf-8')
-        except:
-            try:
-                artist = self.metadata['xesam:artist'][0].encode('utf-8')
-            except:
-                pass
-        album = self.metadata['xesam:album'].encode('utf-8')
-        trackid = self.metadata['mpris:trackid'].encode('utf-8')
-        title = self.metadata['xesam:title'].encode('utf-8')
+        if not self.metadata:
+            return
+        artist = self.metadata['xesam:artist']
+        if isinstance(artist, list):
+            artist = artist[0]
+        album = self.metadata['xesam:album']
+        trackid = self.metadata['mpris:trackid']
+        title = self.metadata['xesam:title']
         year = self.metadata['xesam:contentCreated'][:4]
         cover_image = self.fetch_cover(trackid)
 
-        print '%s - %s - (%s - %s)' % (
-            artist.decode('utf-8'),
-            title.decode('utf-8'),
-            album.decode('utf-8'),
-            year.decode('utf-8'),
-        )
+        print '%s - %s - (%s - %s)' % (artist, title, album, year, )
 
         self.notifier.Notify('Spotify-notify', 0,
-            cover_image, artist, '%s\n%s (%s)' % (title, album, year),
+            cover_image,
+            artist.encode('utf-8'),
+            '%s\n%s (%s)' % (
+                title.encode('utf-8'),
+                album.encode('utf-8'),
+                year.encode('utf-8')
+            ),
             [], {}, -1)
 
     def properties_changed(self, *args):
@@ -127,9 +166,8 @@ class MediaKeyHandler():
         'Previous': 'previous',
     }
 
-    def __init__(self, notifier=None):
+    def __init__(self):
         self.player = SpotifyPlayer()
-        self.notifier = notifier
         self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
 
         self.bus_object = self.bus.get_object(
@@ -151,13 +189,11 @@ class MediaKeyHandler():
         key = message[1]
         if key != 'Stop':
             getattr(self.player, self.key_mapping[key])()
-        else:
-            self.notifier.show()
 
 if __name__ == '__main__':
     DBusGMainLoop(set_as_default=True)
     spotify_notifier = SpotifyNotifier()
-    mediakey_handler = MediaKeyHandler(spotify_notifier)
+    mediakey_handler = MediaKeyHandler()
     loop = gobject.MainLoop()
     spotify_notifier.show()
     loop.run()
