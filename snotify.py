@@ -1,43 +1,35 @@
 #!/usr/bin/python
 
-from dbus.mainloop.glib import DBusGMainLoop
 import urllib2
-import gobject
-import dbus
-import dbus.service
 import re
+from gi.repository import Gio, GLib
 
 
 class SpotifyPlayer(object):
     def __init__(self):
-        self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
-        self.connect()
-        self.bus.get_object(
-            'org.freedesktop.DBus',
-            '/org/freedesktop/DBus',
-        ).connect_to_signal(
-            'NameOwnerChanged',
-            self.activate,
-            arg0='com.spotify.qt',
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            'com.spotify.qt',
+            Gio.DBusProxyFlags.NONE,
+            self.connect,
+            self.disconnect,
+        )
+        self.player = None
+
+    def connect(self, connection, name, owner):
+        self.player = Gio.DBusProxy.new_sync(
+            self.bus,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            'com.spotify.qt',
+            '/org/mpris/MediaPlayer2',
+            'org.mpris.MediaPlayer2.Player',
+            None,
         )
 
-    def connect(self):
-        try:
-            self.player = dbus.Interface(
-                self.bus.get_object(
-                    'com.spotify.qt',
-                    '/org/mpris/MediaPlayer2',
-                ),
-                'org.mpris.MediaPlayer2.Player',
-            )
-        except dbus.exceptions.DBusException:
-            pass
-
-    def activate(self, name, old, new):
-        if new:
-            self.connect()
-        else:
-            del self.player
+    def disconnect(self, connection, name):
+        if self.player:
             self.player = None
 
     def play_pause(self):
@@ -57,54 +49,48 @@ class SpotifyPlayer(object):
             self.player.Previous()
 
 
-class SpotifyNotifier(dbus.service.Object):
+class SpotifyNotifier(object):
     def __init__(self):
         self.metadata = None
         self.current_trackid = None
-        self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
-        self.connect()
-        self.bus.get_object(
-            'org.freedesktop.DBus',
-            '/org/freedesktop/DBus',
-        ).connect_to_signal(
-            'NameOwnerChanged',
-            self.activate,
-            arg0='com.spotify.qt',
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            'com.spotify.qt',
+            Gio.DBusProxyFlags.NONE,
+            self.connect,
+            self.disconnect,
         )
 
-    def connect(self):
-        try:
-            self.notifier = dbus.Interface(
-                self.bus.get_object(
-                    'org.freedesktop.Notifications',
-                    '/org/freedesktop/Notifications',
-                ),
-                'org.freedesktop.Notifications',
-            )
-            self.spotify = self.bus.get_object(
-                    'com.spotify.qt',
-                    '/org/mpris/MediaPlayer2',
-            )
-            self.spotify.connect_to_signal(
-                'PropertiesChanged',
-                self.properties_changed,
-            )
-            self.metadata = dbus.Interface(
-                self.spotify,
-                'org.freedesktop.DBus.Properties',
-            ).Get(
-                'org.mpris.MediaPlayer2.Player',
-                'Metadata',
-            )
-        except dbus.exceptions.DBusException:
-            pass
+    def connect(self, connection, name, owner):
+        self.notifier = Gio.DBusProxy.new_sync(
+            self.bus,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            'org.freedesktop.Notifications',
+            '/org/freedesktop/Notifications',
+            'org.freedesktop.Notifications',
+            None,
+        )
+        self.spotify = Gio.DBusProxy.new_sync(
+            self.bus,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            'com.spotify.qt',
+            '/org/mpris/MediaPlayer2',
+            'org.freedesktop.DBus.Properties',
+            None,
+        )
+        self.spotify.connect('g-signal', self.properties_changed)
+        self.metadata = self.spotify.Get(
+            '(ss)',
+            'org.mpris.MediaPlayer2.Player',
+            'Metadata',
+        )
 
-    def activate(self, name, old, new):
-        if new:
-            self.connect()
-        else:
-            self.metadata = None
-            self.current_trackid = None
+    def disconnect(self, connection, name):
+        self.metadata = None
+        self.current_trackid = None
 
     def get_cover_url(self, trackid):
         url = 'http://open.spotify.com/track/%s' % trackid.split(':')[-1]
@@ -135,25 +121,21 @@ class SpotifyNotifier(dbus.service.Object):
         title = self.metadata['xesam:title']
         year = self.metadata['xesam:contentCreated'][:4]
         cover_image = self.fetch_cover(trackid)
-
         print '%s - %s - (%s - %s)' % (artist, title, album, year, )
-
-        self.notifier.Notify('Spotify-notify', 0,
+        self.notifier.Notify(
+            '(susssasa{sv}i)',
+            'Snotify', 0,
             cover_image,
-            artist.encode('utf-8'),
-            '%s\n%s (%s)' % (
-                title.encode('utf-8'),
-                album.encode('utf-8'),
-                year.encode('utf-8')
-            ),
-            [], {}, -1)
+            artist,
+            '%s\n%s (%s)' % (title, album, year),
+            [], {}, -1,
+        )
 
-    def properties_changed(self, *args):
-        if 'Metadata' not in args[1]:
+    def properties_changed(self, connection, owner, signal, data):
+        if 'Metadata' not in data[1]:
             return
-        self.metadata = args[1]['Metadata']
+        self.metadata = data[1]['Metadata']
         trackid = self.metadata.get('mpris:trackid')
-
         if trackid and trackid != self.current_trackid:
             self.current_trackid = trackid
             self.show()
@@ -168,32 +150,26 @@ class MediaKeyHandler():
 
     def __init__(self):
         self.player = SpotifyPlayer()
-        self.bus = dbus.Bus(dbus.Bus.TYPE_SESSION)
-
-        self.bus_object = self.bus.get_object(
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.media_keys = Gio.DBusProxy.new_sync(
+            self.bus,
+            Gio.DBusProxyFlags.NONE,
+            None,
             'org.gnome.SettingsDaemon',
             '/org/gnome/SettingsDaemon/MediaKeys',
+            'org.gnome.SettingsDaemon.MediaKeys',
+            None,
         )
+        self.media_keys.GrabMediaPlayerKeys('(su)', 'Spotify', 0)
+        self.media_keys.connect('g-signal', self.handle_mediakey)
 
-        self.bus_object.GrabMediaPlayerKeys(
-            'Spotify', 0,
-            dbus_interface='org.gnome.SettingsDaemon.MediaKeys',
-        )
-
-        self.bus_object.connect_to_signal(
-            'MediaPlayerKeyPressed',
-            self.handle_mediakey,
-        )
-
-    def handle_mediakey(self, *message):
-        key = message[1]
+    def handle_mediakey(self, connection, owner, signal, data):
+        key = data[1]
         if key != 'Stop':
             getattr(self.player, self.key_mapping[key])()
 
+
 if __name__ == '__main__':
-    DBusGMainLoop(set_as_default=True)
     spotify_notifier = SpotifyNotifier()
     mediakey_handler = MediaKeyHandler()
-    loop = gobject.MainLoop()
-    spotify_notifier.show()
-    loop.run()
+    GLib.MainLoop().run()
