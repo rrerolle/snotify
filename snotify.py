@@ -95,7 +95,7 @@ class SpotifyNotifier(object):
     def get_cover_url(self, trackid):
         url = 'http://open.spotify.com/track/%s' % trackid.split(':')[-1]
         tracksite = urllib2.urlopen(url).read()
-        matchobject = re.search('o.scdn.co/image/(.*)"', tracksite)
+        matchobject = re.search('o.scdn.co/cover/(.*)"', tracksite)
         return 'http://open.spotify.com/image/' + matchobject.group(1)
 
     def fetch_cover(self, trackid):
